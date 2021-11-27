@@ -22,14 +22,8 @@ pthread_cond_t cond_var = PTHREAD_COND_INITIALIZER;
 
 int send_string_on_socket(int fd, const string &s)
 {
-    // debug(s.length());
-    pthread_mutex_lock(&map_lock);
-    // int idx = user_idx[fd];
-    pthread_mutex_unlock(&map_lock);
-    // pthread_mutex_lock(&client_lock[idx]);
-    int bytes_sent = write(fd, s.c_str(), s.length());
-    // pthread_mutex_unlock(&client_lock[idx]);
-
+    string str = to_string(gettid()) + " : " + s;
+    int bytes_sent = write(fd, str.c_str(), str.length());
     if (bytes_sent < 0)
     {
         cerr << "Failed to SEND DATA via socket.\n";
@@ -219,7 +213,6 @@ void *worker_thread(void *arg)
     }
     return NULL;
 }
-
 
 void init_server_socket()
 {

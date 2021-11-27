@@ -14,9 +14,24 @@
 #include <semaphore.h>
 #include <time.h>
 
-/********* VARIABLES ***********/
+/********* #defines ***********/
 
-#define MAX_LEN 500
+// for status of the person
+
+#define WAITING 0         // waiting for seat to be allocated
+#define SEATED 1          // got the seat , watching the match
+#define AT_EXIT_GATE 2    // at the exit gate
+#define EXITS 3           // exits the stadium
+#define BAD_PERFORMANCE 4 // leaves the seat due to poor performance
+
+// for zone of the person ( home , away or neutral )
+
+#define HOME 10    // home zone
+#define AWAY 20    // away zone
+#define NEUTRAL 30 // neutral zone
+// just defined it this way , as it is easy to compare integers than strings
+
+#define MAX_LEN 500 // max len for objects and stuff
 
 /******** COLORS ********/
 
@@ -30,35 +45,25 @@
 
 /******** GLOBAL VARIABLES **********/
 
-int capacity_zone_H; //capacity for home zone
-int capacity_zone_A; // capacity for away zone
-int capacity_zone_N; // capacity for neutral zone
-int spectate_time;
-int num_groups;
-int num_goal_chances;
+int capacity_zone_H;  //capacity for home zone
+int capacity_zone_A;  // capacity for away zone
+int capacity_zone_N;  // capacity for neutral zone
+int spectate_time;    // the time for which a person spectates the match
+int num_groups;       // number of groups
+int num_goal_chances; // number of goal chances
 
-sem_t H, A, N;
+sem_t H, A, N; // semaphore for respective seat count
 // H is Home Stand capacity
 // A is Away Stand capacity
 // N is Neutral Stand capacity
 
-int away_goals;
+int away_goals; // goals scored by away team
 pthread_mutex_t a_goals = PTHREAD_MUTEX_INITIALIZER;
-int home_goals;
+int home_goals; // goals scored by home team
 pthread_mutex_t h_goals = PTHREAD_MUTEX_INITIALIZER;
 
 /*********** STRUCT DEFINATIONS ***********/
-
-#define WAITING 0
-#define SEATED 1
-#define AT_EXIT_GATE 2
-#define EXITS 3
-#define BAD_PERFORMANCE 4
-
-#define HOME 10
-#define AWAY 20
-#define NEUTRAL 30
-
+// person object
 struct person
 {
     char name[MAX_LEN]; // name of the person
@@ -90,8 +95,10 @@ struct group
     int id;                        // store the group number
     int num_people;                // number of people in a group
     struct person people[MAX_LEN]; //people details
-    int exit_count;
+    int exit_count;                // maintain the count of people waiting at the exit gate
     pthread_cond_t wait_at_gate;
+    bool print;
+    pthread_mutex_t mutex;
 };
 
 struct goals
@@ -102,12 +109,12 @@ struct goals
     pthread_t g_thread;
 };
 
-bool simulation;
+bool simulation; // 1 if simulation gng on , else 0
 struct group spectator_groups[MAX_LEN];
 struct goals goals_list[MAX_LEN];
 
 /***************************HELPER FUNCTIONS***********************************/
-
+// helper function to take input from the user
 void take_input()
 {
     scanf("%d %d %d", &capacity_zone_H, &capacity_zone_A, &capacity_zone_N);
@@ -118,14 +125,15 @@ void take_input()
 
     scanf("%d", &spectate_time);
     scanf("%d", &num_groups);
-    int x;
-    sem_getvalue(&N, &x);
+    // int x;
+    //sem_getvalue(&N, &x);
     // printf("Capacity : %d \n", x);
     for (int i = 0; i < num_groups; i++)
     {
         spectator_groups[i].id = i;
         spectator_groups[i].exit_count = 0;
-        spectator_groups[i].wait_at_gate = PTHREAD_COND_INITIALIZER;
+        pthread_mutex_init(&spectator_groups[i].mutex, NULL);
+        pthread_cond_init(&spectator_groups[i].wait_at_gate, NULL);
         scanf("%d", &spectator_groups[i].num_people);
         for (int j = 0; j < spectator_groups[i].num_people; j++)
         {
@@ -134,6 +142,7 @@ void take_input()
             spectator_groups[i].people[j].zone_allocated = -1;
             spectator_groups[i].people[j].is_allocated = false;
             spectator_groups[i].people[j].status = WAITING;
+            spectator_groups[i].print = 0;
 
             scanf("%s %s %d %d %d", spectator_groups[i].people[j].name, spectator_groups[i].people[j].zone, &spectator_groups[i].people[j].reach_time, &spectator_groups[i].people[j].patience, &spectator_groups[i].people[j].num_goals);
 
@@ -149,7 +158,7 @@ void take_input()
         scanf("%s %d %f", goals_list[i].team, &goals_list[i].time_elapsed, &goals_list[i].chance);
     }
 }
-
+// returns the "struct timespec *" , used in sem_timedwait and stuff for waiting till a limit
 struct timespec *get_time_struct(int time_val)
 {
     struct timespec *ts = (struct timespec *)malloc(sizeof(struct timespec));
@@ -162,15 +171,18 @@ struct timespec *get_time_struct(int time_val)
     return ts;
 }
 
+/************ THREAD FUNCTIONS *******************/
+
 void *goals_thread(void *arg)
 {
-    int id = *(int *)arg;
+    int id = *(int *)arg; // get the goal id
     int time_elapsed = goals_list[id].time_elapsed;
     float chance = goals_list[id].chance;
-    sleep(time_elapsed);
-    float prob_goal = (float)rand() / RAND_MAX;
+    sleep(time_elapsed);                        // sleep until the chance arises
+    float prob_goal = (float)rand() / RAND_MAX; // random probability
     if (chance >= prob_goal)
     {
+        // scored the goal
         if (goals_list[id].team[0] == 'H')
         {
             pthread_mutex_lock(&h_goals);
@@ -188,6 +200,7 @@ void *goals_thread(void *arg)
     }
     else
     {
+        // goal missed
         if (goals_list[id].team[0] == 'H')
             printf(ANSI_RED "Team %s missed the chance to score their %d goal\n" ANSI_RESET, goals_list[id].team, home_goals + 1);
         else
@@ -198,32 +211,39 @@ void *goals_thread(void *arg)
 
 void *home_fan_thread(void *arg)
 {
-    struct person *spectator = (struct person *)arg;
-    int ret = sem_timedwait(&H, spectator->t);
-    if (ret != 0)
-    {
-        // printf("%s : is here2 : %d\n", spectator->name, errno);
+    // thread to look for seat into the home stand
 
+    struct person *spectator = (struct person *)arg; // get the argument
+    int ret = sem_timedwait(&H, spectator->t);       // wait for the seat , until the patience limit of the spectator
+    if (ret == -1)                                   // timed out , patience exhausted
+    {
+        // timed out , coudlnt get a seat
+        // decrement the counter variable and signal the waiting thread
+
+        /**************DEBUG statements ********/
+        // printf("%s : is here2 : %d\n", spectator->name, errno);
         // printf("%s : HIIIII\n", spectator->name);
         pthread_mutex_lock(&spectator->mutex);
-        spectator->counter--;
+        spectator->counter--; // decrement the counter variable
         pthread_mutex_unlock(&spectator->mutex);
-        pthread_cond_signal(&spectator->cond_var);
+        pthread_cond_signal(&spectator->cond_var); // signal the main thread
         return NULL;
     }
-    // if the person was already allocated seat by some other thread
+
+    // got the seat now
     pthread_mutex_lock(&spectator->mutex);
     if (!spectator->is_allocated)
     {
+        // if has not been allocated seat by any fellow threads , allocate a seat
         // printf(ANSI_GREEN "Person %d from group %d has been allocated a seat in stand Home\n" ANSI_RESET, spectator->id, spectator->group_id);
-        spectator->is_allocated = true;
-        spectator->status = SEATED;
-        spectator->zone_allocated = HOME;
+        spectator->is_allocated = true;   // mark the boolean variable
+        spectator->status = SEATED;       // change the state
+        spectator->zone_allocated = HOME; // allocate the zone
         pthread_mutex_unlock(&spectator->mutex);
         pthread_cond_signal(&spectator->cond_var);
         return NULL;
     }
-    else
+    else              // if already allocated the seat , dont allocate a new one  increase the semaphore value and exit :)
         sem_post(&H); // if already allocated , then dont allot the seat
     pthread_mutex_unlock(&spectator->mutex);
     return NULL;
@@ -231,7 +251,7 @@ void *home_fan_thread(void *arg)
 
 void *away_fan_thread(void *arg)
 {
-    // thread to look for seat in the away zone
+    // thread to look for seat in the away zone similiar to home_fan_thread
     struct person *spectator = (struct person *)arg;
     int ret = sem_timedwait(&A, spectator->t);
     if (ret != 0)
@@ -268,7 +288,7 @@ void *away_fan_thread(void *arg)
 
 void *neutral_fan_thread(void *arg)
 {
-    // thread to look for seat in the neutral zone
+    // thread to look for seat in the neutral zone , and similiar to home_fan_thread
     struct person *spectator = (struct person *)arg;
     int x;
 
@@ -316,6 +336,7 @@ void *neutral_fan_thread(void *arg)
 
 void *signal_thread(void *arg)
 {
+    // the thread that signals the people thread once goal limit they can bear has been reached
     while (simulation)
     {
         pthread_mutex_lock(&a_goals);
@@ -325,22 +346,25 @@ void *signal_thread(void *arg)
             for (int j = 0; j < spectator_groups[i].num_people; j++)
             {
                 int goal_limit = spectator_groups[i].people[j].num_goals;
-                if (spectator_groups[i].people[j].status == WAITING || spectator_groups[i].people[j].status == SEATED)
+                if (spectator_groups[i].people[j].status == WAITING || spectator_groups[i].people[j].status == SEATED) // check the current status of the spectator
                     if (spectator_groups[i].people[j].zone[0] == 'H')
                     {
                         if (goal_limit <= away_goals)
                         {
+                            // check the goal limit of the spectator
                             pthread_mutex_lock(&spectator_groups[i].people[j].mutex);
-                            spectator_groups[i].people[j].status = BAD_PERFORMANCE;
+                            spectator_groups[i].people[j].status = BAD_PERFORMANCE; // change the status
                             pthread_mutex_unlock(&spectator_groups[i].people[j].mutex);
-                            //            printf("Signalling %s in stand H\n", spectator_groups[i].people[j].name);
-                            pthread_cond_signal(&spectator_groups[i].people[j].cond_var);
+                            //printf("Signalling %s in stand H\n", spectator_groups[i].people[j].name);
+                            pthread_cond_signal(&spectator_groups[i].people[j].cond_var); // send signal
                         }
                     }
                     else if (spectator_groups[i].people[j].zone[0] == 'A')
                     {
+                        // check goal limit of the spectator
                         if (goal_limit <= home_goals)
                         {
+                            // if more , then signa the waiting thread and change the status
                             pthread_mutex_lock(&spectator_groups[i].people[j].mutex);
                             spectator_groups[i].people[j].status = BAD_PERFORMANCE;
                             //         printf("Signalling %s in stand A\n", spectator_groups[i].people[j].name);
@@ -356,6 +380,65 @@ void *signal_thread(void *arg)
     return NULL;
 }
 
+void vacate_seat(int zone)
+{
+    switch (zone)
+    {
+    case HOME:
+        sem_post(&H);
+        break;
+    case AWAY:
+        sem_post(&A);
+        break;
+    case NEUTRAL:
+        sem_post(&N);
+        break;
+    default:
+        break;
+    }
+    return;
+}
+
+int find_seat(int zone, struct person *spectator)
+{
+    pthread_t home_thread;
+    pthread_t away_thread;
+    pthread_t neutral_thread;
+    if (zone == HOME)
+    {
+        // if home fan , check for seat in home and neutral thread
+        spectator->counter = 2;
+        spectator->t = get_time_struct(spectator->patience);
+        pthread_create(&home_thread, NULL, home_fan_thread, (void *)(spectator));
+        pthread_create(&neutral_thread, NULL, neutral_fan_thread, (void *)(spectator));
+    }
+    else if (zone == AWAY)
+    {
+        // if away check only in away thread
+        spectator->counter = 1;
+        spectator->t = get_time_struct(spectator->patience);
+        pthread_create(&away_thread, NULL, away_fan_thread, (void *)(spectator));
+    }
+    else if (zone == NEUTRAL)
+    {
+        // if neutral check in home and away thread and neutral thread
+        spectator->counter = 3;
+        spectator->t = get_time_struct(spectator->patience);
+        // if (strcmp(spectator->name, "Roshan") == 0)
+        // printf("%ld : %ld \n", spectator->t->tv_nsec, spectator->t->tv_sec);
+
+        pthread_create(&neutral_thread, NULL, neutral_fan_thread, (void *)(spectator));
+        pthread_create(&home_thread, NULL, home_fan_thread, (void *)(spectator));
+        pthread_create(&away_thread, NULL, away_fan_thread, (void *)(spectator));
+    }
+    else
+    {
+        printf(ANSI_RED "Not a valid zone type , fatal error\n" ANSI_RESET);
+        return -1;
+    }
+    return 0;
+}
+
 void *spectator_thread(void *arg)
 {
     // to simulate the the spectator using threads
@@ -363,7 +446,7 @@ void *spectator_thread(void *arg)
     // after a seat is allocated to the person , the person goes and sits
     // There's no need for a loop or smth for the spectatotr thread , since anyways
 
-    struct person *spectator = (struct person *)arg;
+    struct person *spectator = (struct person *)arg; // get the spectator object
     int group_id = spectator->group_id;
     int spec_id = spectator->id;
     int time_arrive = spectator->reach_time;
@@ -372,7 +455,7 @@ void *spectator_thread(void *arg)
     int zone;
 
     strcpy(team, spectator->zone);
-
+    // assign the zone
     if (strcmp(team, "H") == 0)
         zone = HOME;
     else if (strcmp(team, "A") == 0)
@@ -380,142 +463,132 @@ void *spectator_thread(void *arg)
     else
         zone = NEUTRAL;
 
+    // wait for arrival of the thread
     int ret = sleep(time_arrive);
     // printf("Slept for time %s : %d\n", spectator->name, time_arrive);
     assert(ret == 0);
     // printf("####%s : %d\n", spectator->name, spectator->t->tv_sec);
     // printf("**********%s : %ld***********\n", spectator->name, ts.tv_sec);
+
     int goal_flag;
     pthread_mutex_lock(&a_goals);
     pthread_mutex_lock(&h_goals);
+
     if (zone == HOME)
         goal_flag = away_goals < spectator->num_goals;
     else if (zone == AWAY)
         goal_flag = home_goals < spectator->num_goals;
     else
         goal_flag = true;
+
     pthread_mutex_unlock(&h_goals);
     pthread_mutex_unlock(&a_goals);
 
     printf(ANSI_MAGENTA "%s has reached the stadium\n" ANSI_RESET, spectator->name);
 
+    // before entring the simulation , check if the goal condition is violated , if yes , leave immediately
+    // does not hold true for NEUTRAL fan thread
     if (zone != NEUTRAL && !goal_flag)
     {
         spectator->status = BAD_PERFORMANCE;
         printf(ANSI_RED "%s is leaving due to bad performance of his team\n" ANSI_RESET, spectator->name);
-        return NULL;
+        goto exit_gate;
     }
+
     spectator->zone_allocated = -1;
 
-    if (spectator->status == WAITING && goal_flag)
-    {
-        // spawn the threads corresponding to each of the zones , that signal the threads to wait for the seats
-        pthread_t home_thread;
-        pthread_t away_thread;
-        pthread_t neutral_thread;
+    if (spectator->status == WAITING && goal_flag) // spawn the threads corresponding to each of the zones , that signal the threads to wait for the seats
+        find_seat(zone, spectator);
 
-        if (zone == HOME)
-        {
-            spectator->counter = 2;
-            spectator->t = get_time_struct(spectator->patience);
-            pthread_create(&home_thread, NULL, home_fan_thread, (void *)(spectator));
-            pthread_create(&neutral_thread, NULL, neutral_fan_thread, (void *)(spectator));
-        }
-        else if (zone == AWAY)
-        {
-            spectator->counter = 1;
-            spectator->t = get_time_struct(spectator->patience);
-            pthread_create(&away_thread, NULL, away_fan_thread, (void *)(spectator));
-        }
-
-        else if (zone == NEUTRAL)
-        {
-            spectator->counter = 3;
-            spectator->t = get_time_struct(spectator->patience);
-            // if (strcmp(spectator->name, "Roshan") == 0)
-            //     printf("%ld : %ld \n", spectator->t->tv_nsec, spectator->t->tv_sec);
-
-            pthread_create(&neutral_thread, NULL, neutral_fan_thread, (void *)(spectator));
-            pthread_create(&home_thread, NULL, home_fan_thread, (void *)(spectator));
-            pthread_create(&away_thread, NULL, away_fan_thread, (void *)(spectator));
-        }
-        else
-        {
-            printf(ANSI_RED "Not a valid zone type , fatal error\n" ANSI_RESET);
-            return NULL;
-        }
-    }
     pthread_mutex_lock(&spectator->mutex);
 
-    while (spectator->counter > 0 && spectator->is_allocated == 0)
+    while (spectator->counter > 0 && spectator->is_allocated == 0 && spectator->status == WAITING)
     {
-        // printf("#########%d\n", spectator->counter);
+        // go on sleep , until all the threads have timed out ( in that case counter == 0 and is_allocated = 0 as well)
+        // else if seat gets allocated by any of the threads , this thread is signalled wiith is_allocated set to 1
+        // leaves to watch the match immediately
         pthread_cond_wait(&spectator->cond_var, &spectator->mutex);
-        // if (strcmp(spectator->name, "Roshan") == 0)
-        //     printf("counter val is : %d , %d , %d \n", spectator->counter, spectator->is_allocated, spectator->zone_allocated);
     }
+    // breaks from the loop in 3 cases
+    // 1. if the spectator is allocated a seat
+    // 2. if the spectator is not allocated a seat ( and counter is set to 0 , all threads failed to get the seat )
+    // 3. if team performs poorly in that case , status set to bad performance
 
-    // check if the student got there
-    if (spectator->is_allocated == 0)
+    if (spectator->status == BAD_PERFORMANCE) // condition 3
+    {
+        printf(ANSI_RED "%s is leaving due to bad performance of his team\n" ANSI_RESET, spectator->name);
+        pthread_mutex_unlock(&spectator->mutex);
+        spectator->status = AT_EXIT_GATE;
+        goto exit_gate;
+    }
+    if (spectator->is_allocated == 0) // condition 2
     {
         // could not be allotted seat leave for the exit gate
         printf(ANSI_RED "%s could not get a seat\n" ANSI_RESET, spectator->name);
+        spectator->status = AT_EXIT_GATE;
         pthread_mutex_unlock(&spectator->mutex);
-        return NULL;
+        goto exit_gate;
     }
+
+    // allocated the seat
     pthread_mutex_unlock(&spectator->mutex);
     if (spectator->status == SEATED && spectator->is_allocated)
     {
+        // if allocated the zeat , print the corresponding message
         if (spectator->zone_allocated == HOME)
-        {
-
             printf(ANSI_GREEN "%s has got a seat in zone H\n" ANSI_RESET, spectator->name);
-        }
-        if (spectator->zone_allocated == AWAY)
-        {
+        else if (spectator->zone_allocated == AWAY)
             printf(ANSI_GREEN "%s has got a seat in zone A\n" ANSI_RESET, spectator->name);
-        }
-        if (spectator->zone_allocated == NEUTRAL)
-        {
+        else if (spectator->zone_allocated == NEUTRAL)
             printf(ANSI_GREEN "%s has got a seat in zone N\n" ANSI_RESET, spectator->name);
-        }
     }
-    if (spectator->status == BAD_PERFORMANCE)
-    {
-        // signalled by the goal thread or something , to leave the
-        printf(ANSI_RED "%s is leaving due to bad performance of his team\n" ANSI_RESET, spectator->name);
-        return NULL;
-    }
-    // watch the match , and empty if done watching the match for max limit ye ?
-
+    // watch the match , and empty if done watching the match for max limit
     pthread_mutex_lock(&spectator->mutex);
 
     struct timespec *ts1 = get_time_struct(spectate_time);
     do
     {
+        // keep watching the match until , the time limit is reached or goal performance thing is violated
         ret = pthread_cond_timedwait(&spectator->cond_var, &spectator->mutex, ts1);
-    } while (ret != ETIMEDOUT);
+    } while (ret != ETIMEDOUT && spectator->status == SEATED);
+
     pthread_mutex_unlock(&spectator->mutex);
+
     // student could have either completed the time limit or could have bad performance vala thing
     // vacate the space
-    if (spectator->zone_allocated == HOME)
-        sem_post(&H);
-    else if (spectator->zone_allocated == AWAY)
-        sem_post(&A);
-    else if (spectator->zone_allocated == NEUTRAL)
-        sem_post(&N);
+    vacate_seat(spectator->zone_allocated);
 
     if (spectator->status == BAD_PERFORMANCE)
     {
         // signalled by the goal thread or something , to leave the
+        spectator->status = AT_EXIT_GATE;
         printf(ANSI_RED "%s is leaving due to bad performance of his team\n" ANSI_RESET, spectator->name);
-        return NULL;
+        goto exit_gate;
     }
     if (ret != 0)
     {
+        spectator->status = AT_EXIT_GATE;
         printf(ANSI_YELLOW "%s watched the match for %d seconds and is leaving\n" ANSI_RESET, spectator->name, spectate_time);
-        return NULL;
+        goto exit_gate;
     }
+
+exit_gate:
+
+    printf(ANSI_BLUE "%s is waiting for friends at exit\n" ANSI_RESET, spectator->name);
+    pthread_mutex_lock(&spectator_groups[group_id].mutex);
+    spectator_groups[group_id].exit_count++;
+    pthread_cond_broadcast(&spectator_groups[group_id].wait_at_gate);
+    while (spectator_groups[group_id].exit_count != spectator_groups[group_id].num_people)
+    {
+        pthread_cond_wait(&spectator_groups[group_id].wait_at_gate, &spectator_groups[group_id].mutex);
+    }
+    if (!spectator_groups[group_id].print)
+    {
+        printf(ANSI_BLUE "Group %d is leaving for dinner\n" ANSI_RESET, group_id);
+        spectator_groups[group_id].print = 1;
+    }
+    pthread_mutex_unlock(&spectator_groups[group_id].mutex);
+
     return NULL;
 }
 
@@ -552,6 +625,7 @@ int main()
             pthread_join(spectator_groups[i].people[j].p_thread, NULL);
         }
     }
+
     simulation = false;
     return 0;
 }

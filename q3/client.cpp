@@ -84,7 +84,7 @@ void *client_thread(void *(arg))
         return NULL;
     }
     pthread_mutex_lock(&terminal);
-    cout << clients[idx].i << " : " << gettid() << " : " << buffer << endl;
+    cout << clients[idx].i << " : " << buffer << endl;
     pthread_mutex_unlock(&terminal);
 
     pthread_mutex_unlock(&clients[idx].mutex);
